@@ -75,7 +75,7 @@ class RenderCamera:
     # Functions from RenderCameraComponent
     # -------------------------------------------------------------------------- #
     def get_extrinsic_matrix(self):
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             if self._cached_extrinsic_matrix is not None:
                 return self._cached_extrinsic_matrix
             ros2opencv = torch.tensor(
@@ -106,20 +106,23 @@ class RenderCamera:
     def get_intrinsic_matrix(self):
         if self._cached_intrinsic_matrix is None:
             self._cached_intrinsic_matrix = common.to_tensor(
-                np.array([cam.get_intrinsic_matrix() for cam in self._render_cameras])
+                np.array([cam.get_intrinsic_matrix() for cam in self._render_cameras]),
+                device=self.scene.device,
             )
         return self._cached_intrinsic_matrix
 
     def get_local_pose(self) -> Pose:
         if self._cached_local_pose is None:
-            if physx.is_gpu_enabled():
+            if self.scene.gpu_sim_enabled:
                 ps = np.array(
                     [
                         np.concatenate([cam.get_local_pose().p, cam.get_local_pose().q])
                         for cam in self._render_cameras
                     ]
                 )
-                self._cached_local_pose = Pose.create(common.to_tensor(ps))
+                self._cached_local_pose = Pose.create(
+                    common.to_tensor(ps), device=self.scene.device
+                )
             else:
                 self._cached_local_pose = Pose.create_from_pq(
                     self._render_cameras[0].get_local_pose().p,
@@ -129,7 +132,7 @@ class RenderCamera:
 
     def get_model_matrix(self):
 
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             if self._cached_model_matrix is not None:
                 return self._cached_model_matrix
             # NOTE (stao): This code is based on SAPIEN. It cannot expose GPU buffers of this data of all cameras directly so
@@ -157,7 +160,7 @@ class RenderCamera:
     def get_picture(self, names: Union[str, List[str]]) -> List[torch.Tensor]:
         if isinstance(names, str):
             names = [names]
-        if physx.is_gpu_enabled() and not self.scene.parallel_in_single_scene:
+        if self.scene.gpu_sim_enabled and not self.scene.parallel_in_single_scene:
             if SAPIEN_RENDER_SYSTEM == "3.0":
                 return [
                     self.camera_group.get_picture_cuda(name).torch() for name in names
@@ -165,10 +168,18 @@ class RenderCamera:
             elif SAPIEN_RENDER_SYSTEM == "3.1":
                 return [x.torch() for x in self.camera_group.get_cuda_pictures(names)]
         else:
-            return [
-                common.to_tensor(self._render_cameras[0].get_picture(name))[None, ...]
-                for name in names
-            ]
+            if self.scene.backend.render_backend == "sapien_cuda":
+                return [
+                    self._render_cameras[0].get_picture_cuda(name).torch()[None, ...]
+                    for name in names
+                ]
+            else:
+                return [
+                    common.to_tensor(self._render_cameras[0].get_picture(name))[
+                        None, ...
+                    ]
+                    for name in names
+                ]
 
     # def get_picture_cuda(self, name: str):
     #     return self._render_cameras[0].get_picture_cuda(name)
@@ -208,6 +219,7 @@ class RenderCamera:
     def set_local_pose(self, arg0: sapien.Pose) -> None:
         for obj in self._render_cameras:
             obj.set_local_pose(arg0)
+        self._cached_local_pose = None
 
     def set_near(self, near: float) -> None:
         for obj in self._render_cameras:
@@ -255,7 +267,7 @@ class RenderCamera:
     #     self._render_cameras[0].set_texture_array(name, textures)
 
     def take_picture(self) -> None:
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             self.camera_group.take_picture()
         else:
             self._render_cameras[0].take_picture()
@@ -299,7 +311,7 @@ class RenderCamera:
 
     @property
     def global_pose(self) -> sapien.Pose:
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             if self.mount is not None:
                 return self.mount.pose * self.get_local_pose()
             return self.get_local_pose()

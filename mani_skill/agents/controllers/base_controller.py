@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
 import sapien
@@ -39,12 +39,17 @@ class BaseController:
     _original_single_action_space: spaces.Space
     """The unbatched, original action space without any additional processing like normalization"""
 
+    sets_target_qpos: bool
+    """Whether the controller sets the target qpos of the articulation"""
+    sets_target_qvel: bool
+    """Whether the controller sets the target qvel of the articulation"""
+
     def __init__(
         self,
         config: "ControllerConfig",
         articulation: Articulation,
         control_freq: int,
-        sim_freq: int = None,
+        sim_freq: Optional[int] = None,
         scene: ManiSkillScene = None,
     ):
         self.config = config
@@ -82,7 +87,7 @@ class BaseController:
             self.joints = get_joints_by_names(self.articulation, joint_names)
             self.active_joint_indices = get_active_joint_indices(
                 self.articulation, joint_names
-            )
+            ).to(self.device)
         except Exception as err:
             print("Encounter error when parsing joint names.")
             active_joint_names = [x.name for x in self.articulation.get_active_joints()]
@@ -160,18 +165,23 @@ class BaseController:
             self._original_single_action_space.low,
             self._original_single_action_space.high,
         )
-        self.action_space_low = common.to_tensor(low)
-        self.action_space_high = common.to_tensor(high)
+        self.action_space_low = common.to_tensor(low, device=self.device)
+        self.action_space_high = common.to_tensor(high, device=self.device)
 
     def _clip_and_scale_action(self, action):
         return gym_utils.clip_and_scale_action(
             action, self.action_space_low, self.action_space_high
         )
 
+    def __repr__(self):
+        return f"{self.__class__.__name__}(dof={len(self.active_joint_indices)}, active_joints={len(self.joints)}, joints=({', '.join([x.name for x in self.joints])}))"
+
 
 @dataclass
 class ControllerConfig:
     joint_names: List[str]
+    """the names of the joints to control. Note that some controller configurations might not actually let you directly control all the given joints
+    and will instead have some other implicit control (e.g. Passive controllers or mimic controllers)."""
     # NOTE(jigu): It is a class variable in this base class,
     # but you can inherit it and overwrite with an instance variable.
     controller_cls = BaseController
@@ -208,6 +218,16 @@ class DictController(BaseController):
                 self.single_action_space, n=self.scene.num_envs
             )
 
+        self.sets_target_qpos = False
+        self.sets_target_qvel = False
+        for controller in self.controllers.values():
+            self.sets_target_qpos = self.sets_target_qpos or controller.sets_target_qpos
+            self.sets_target_qvel = self.sets_target_qvel or controller.sets_target_qvel
+
+    def before_simulation_step(self):
+        for controller in self.controllers.values():
+            controller.before_simulation_step()
+
     def _initialize_action_space(self):
         # Explicitly create a list of key-value tuples
         # Otherwise, spaces.Dict will sort keys if a dict is provided
@@ -234,7 +254,7 @@ class DictController(BaseController):
 
     def set_action(self, action: Dict[str, np.ndarray]):
         for uid, controller in self.controllers.items():
-            controller.set_action(common.to_tensor(action[uid]))
+            controller.set_action(action[uid])
 
     def get_state(self) -> dict:
         states = {}
@@ -253,7 +273,7 @@ class DictController(BaseController):
         This can be useful for joint position control when setting a desired qposition even
         if some controllers merge some joints together like the mimic controller
         """
-        qpos = common.to_tensor(qpos)
+        qpos = common.to_tensor(qpos, device=self.device)
         if len(qpos.shape) > 1:
             assert qpos.shape[1] == len(self.joints)
         else:
@@ -268,6 +288,21 @@ class DictController(BaseController):
             start = start + njoints
             final_action.append(sub_action)
         return torch.concat(final_action)
+
+    def __repr__(self):
+        dims = len(self.joints)
+        dof = sum(
+            [
+                controller.single_action_space.shape[0]
+                for controller in self.controllers.values()
+            ]
+        )
+        main_str = f"{self.__class__.__name__}(dof={dof}, active_joints={dims}"
+        for uid, controller in self.controllers.items():
+            controller_str = controller.__repr__()
+            controller_str = controller_str.replace("\n", "\n    ")
+            main_str += f"\n    {uid}: {controller_str}"
+        return main_str + "\n)"
 
 
 class CombinedController(DictController):

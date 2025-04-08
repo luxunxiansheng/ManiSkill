@@ -126,6 +126,9 @@ class PDEEPosController(PDJointPosController):
                 target_pose[:, :3], target_pose[:, 3:]
             )
 
+    def __repr__(self):
+        return f"{self.__class__.__name__}(dof={self.single_action_space.shape[0]}, active_joints={len(self.joints)}, end_link={self.config.ee_link}, joints=({', '.join([x.name for x in self.joints])}))"
+
 
 # TODO (stao): This config should really inherit the pd joint pos controller config
 @dataclass
@@ -199,7 +202,8 @@ class PDEEPoseController(PDEEPosController):
         pos_action = gym_utils.clip_and_scale_action(
             action[:, :3], self.action_space_low[:3], self.action_space_high[:3]
         )
-        rot_action = action[:, 3:]
+        # need to clone here to avoid in place modification of the original action data
+        rot_action = action[:, 3:].clone()
 
         rot_norm = torch.linalg.norm(rot_action, axis=1)
         rot_action[rot_norm > 1] = torch.mul(rot_action, 1 / rot_norm[:, None])[

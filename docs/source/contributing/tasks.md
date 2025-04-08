@@ -54,9 +54,9 @@ class YourEnv(BaseEnv):
 
 ## GPU Simulation Code/Testing
 
-Whenever possible, task code should be written in batch mode (assuming all data in and out are batched by the number of parallel environments). This generally ensures that the task is then GPU simulatalbe, which is of great benefit to workflows that leverage sim data collection at scale.
+Whenever possible, task code should be written in batch mode (assuming all data in and out are batched by the number of parallel environments). This generally ensures that the task is then GPU simulatable, which is of great benefit to workflows that leverage sim data collection at scale.
 
-GPU simulation also entails tuning the GPU simulation configurations. You can opt to do two ways, dynamic or fix GPU simulation configurations.
+GPU simulation also entails tuning the GPU simulation configurations. You can opt to do two ways, dynamic or fixed GPU simulation configurations.
 
 A version of fixed configurations can be seen in `mani_skill/envs/tasks/push_cube.py` which defines the default
 
@@ -123,7 +123,7 @@ Examples of task cards are found throughout the [task documentation](../tasks/in
 
 ## (Optional) Contributing the Task to ManiSkill Officially
 
-When contributing the task, make sure you do the following:
+When contributing to the task, make sure you do the following:
 
 - The task code itself should have a reasonable unique name and be placed in `mani_skill/envs/tasks`.
 - Added a demo video of the task being solved successfully (for each variation if there are several) to `figures/environment_demos`. The video should have ray-tracing on so it looks nicer! This can be done by replaying a trajectory with `human_render_camera_configs=dict(shader_pack="rt")` passed into `gym.make` when making the environment.

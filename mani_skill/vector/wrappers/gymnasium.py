@@ -7,6 +7,7 @@ import torch
 from gymnasium.vector import VectorEnv
 
 from mani_skill.utils.structs.types import Array
+from mani_skill.utils.common import torch_clone_dict
 
 if TYPE_CHECKING:
     from mani_skill.envs.sapien_env import BaseEnv
@@ -51,11 +52,13 @@ class ManiSkillVectorEnv(VectorEnv):
         self.record_metrics = record_metrics
         self.spec = self._env.spec
         super().__init__(
-            num_envs, self._env.single_observation_space, self._env.single_action_space
+            num_envs,
+            self._env.get_wrapper_attr("single_observation_space"),
+            self._env.get_wrapper_attr("single_action_space"),
         )
         if not self.ignore_terminations and auto_reset:
             assert (
-                self.base_env.reconfiguration_freq == 0
+                self.base_env.reconfiguration_freq == 0 or self.base_env.num_envs == 1
             ), "With partial resets, environment cannot be reconfigured automatically"
 
         if self.record_metrics:
@@ -139,12 +142,13 @@ class ManiSkillVectorEnv(VectorEnv):
         dones = torch.logical_or(terminations, truncations)
 
         if dones.any() and self.auto_reset:
-            final_obs = obs
+            final_obs = torch_clone_dict(obs)
             env_idx = torch.arange(0, self.num_envs, device=self.device)[dones]
-            obs, _ = self.reset(options=dict(env_idx=env_idx))
-            infos["final_info"] = infos.copy()
+            final_info = torch_clone_dict(infos)
+            obs, infos = self.reset(options=dict(env_idx=env_idx))
             # gymnasium calls it final observation but it really is just o_{t+1} or the true next observation
             infos["final_observation"] = final_obs
+            infos["final_info"] = final_info
             # NOTE (stao): that adding masks like below is a bit redundant and not necessary
             # but this is to follow the standard gymnasium API
             infos["_final_info"] = dones
@@ -157,7 +161,7 @@ class ManiSkillVectorEnv(VectorEnv):
         return self._env.close()
 
     def call(self, name: str, *args, **kwargs):
-        function = getattr(self.env, name)
+        function = getattr(self._env, name)
         return function(*args, **kwargs)
 
     def get_attr(self, name: str):

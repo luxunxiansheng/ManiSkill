@@ -6,7 +6,7 @@ This page documents key things to know when setting up ManiSkill environments fo
 - How to [**correctly** evaluate RL policies fairly](#evaluation)
 - [Useful Wrappers](#useful-wrappers)
 
-ManiSkill environments are created by gymnasium's `make` function. The result is by default a "batched" environment where every input and output is batched. Note that this is not standard gymnasium API. If you want the standard gymnasium environemnt / vectorized environment API see the next sections.
+ManiSkill environments are created by gymnasium's `make` function. The result is by default a "batched" environment where every input and output is batched. Note that this is not standard gymnasium API. If you want the standard gymnasium environment / vectorized environment API see the next sections.
 
 ```python
 import mani_skill.envs
@@ -60,7 +60,7 @@ obs, rew, terminated, truncated, info = env.step(env.action_space.sample())
 
 You may also notice that there are two additional options when creating a vector env. The `auto_reset` argument controls whether to automatically reset a parallel environment when it is terminated or truncated. This is useful depending on algorithm. The `ignore_terminations` argument controls whether environments reset upon terminated being True. Like gymnasium vector environments, partial resets can occur where some parallel environments reset while others do not.
 
-Note that for efficiency, everything returned by the environment will be a batched torch tensor on the GPU and not a batched numpy array on the CPU. This the only difference you may need to account for between ManiSkill vectorized environments and gymnasium vectorized environments.
+Note that for efficiency, everything returned by the environment will be a batched torch tensor on the GPU and not a batched numpy array on the CPU. This is the only difference you may need to account for between ManiSkill vectorized environments and gymnasium vectorized environments.
 
 ## Evaluation
 
@@ -145,4 +145,4 @@ RL practitioners often use wrappers to modify and augment environments. These ar
 
 In old environments/benchmarks, people often have used `env.render(mode="rgb_array")` or `env.render()` to get image inputs for RL agents. This is not correct because image observations are returned by `env.reset()` and `env.step()` directly and `env.render` is just for visualization/video recording only in ManiSkill.
 
-For robotics tasks observations often are composed of state information (like robot joint angles) and image observations (like camera images). All tasks in ManiSkill will specifically remove certain priviliged state information from the observations when the `obs_mode` is not `state` or `state_dict` like ground truth object poses. Moreover, the image observations returned by `env.reset()` and `env.step()` are usually from cameras that are positioned in specific locations to provide a good view of the task to make it solvable.
+For robotics tasks observations often are composed of state information (like robot joint angles) and image observations (like camera images). All tasks in ManiSkill will specifically remove certain privileged state information from the observations when the `obs_mode` is not `state` or `state_dict` like ground truth object poses. Moreover, the image observations returned by `env.reset()` and `env.step()` are usually from cameras that are positioned in specific locations to provide a good view of the task to make it solvable.

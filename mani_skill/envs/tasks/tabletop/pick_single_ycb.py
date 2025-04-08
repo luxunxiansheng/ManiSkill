@@ -8,7 +8,6 @@ from mani_skill import ASSET_DIR
 from mani_skill.agents.robots.fetch.fetch import Fetch
 from mani_skill.agents.robots.panda.panda import Panda
 from mani_skill.agents.robots.panda.panda_wristcam import PandaWristCam
-from mani_skill.agents.robots.xmate3.xmate3 import Xmate3Robotiq
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.envs.utils.randomization.pose import random_quaternions
 from mani_skill.sensors.camera import CameraConfig
@@ -26,6 +25,27 @@ WARNED_ONCE = False
 
 @register_env("PickSingleYCB-v1", max_episode_steps=50, asset_download_ids=["ycb"])
 class PickSingleYCBEnv(BaseEnv):
+    """
+    **Task Description:**
+    Pick up a random object sampled from the [YCB dataset](https://www.ycbbenchmarks.com/) and move it to a random goal position
+
+    **Randomizations:**
+    - the object's xy position is randomized on top of a table in the region [0.1, 0.1] x [-0.1, -0.1]. It is placed flat on the table
+    - the object's z-axis rotation is randomized
+    - the object geometry is randomized by randomly sampling any YCB object. (during reconfiguration)
+
+    **Success Conditions:**
+    - the object position is within goal_thresh (default 0.025) euclidean distance of the goal position
+    - the robot is static (q velocity < 0.2)
+
+    **Goal Specification:**
+    - 3D goal position (also visualized in human renders)
+
+    **Additional Notes**
+    - On GPU simulation, in order to collect data from every possible object in the YCB database we recommend using at least 128 parallel environments or more, otherwise you will need to reconfigure in order to sample new objects.
+    """
+
+    _sample_video_link = "https://github.com/haosulab/ManiSkill/raw/main/figures/environment_demos/PickSingleYCB-v1_rt.mp4"
 
     SUPPORTED_ROBOTS = ["panda", "panda_wristcam", "fetch"]
     agent: Union[Panda, PandaWristCam, Fetch]
@@ -43,9 +63,19 @@ class PickSingleYCBEnv(BaseEnv):
         self.robot_init_qpos_noise = robot_init_qpos_noise
         self.model_id = None
         self.all_model_ids = np.array(
-            list(
-                load_json(ASSET_DIR / "assets/mani_skill2_ycb/info_pick_v0.json").keys()
-            )
+            [
+                k
+                for k in load_json(
+                    ASSET_DIR / "assets/mani_skill2_ycb/info_pick_v0.json"
+                ).keys()
+                if k
+                not in [
+                    "022_windex_bottle",
+                    "028_skillet_lid",
+                    "029_plate",
+                    "059_chain",
+                ]  # NOTE (arth): ignore these non-graspable/hard to grasp ycb objects
+            ]
         )
         if reconfiguration_freq is None:
             if num_envs == 1:
@@ -61,6 +91,14 @@ class PickSingleYCBEnv(BaseEnv):
         )
 
     @property
+    def _default_sim_config(self):
+        return SimConfig(
+            gpu_memory_config=GPUMemoryConfig(
+                max_rigid_contact_count=2**20, max_rigid_patch_count=2**19
+            )
+        )
+
+    @property
     def _default_sensor_configs(self):
         pose = sapien_utils.look_at(eye=[0.3, 0, 0.6], target=[-0.1, 0, 0.1])
         return [CameraConfig("base_camera", pose, 128, 128, np.pi / 2, 0.01, 100)]
@@ -69,6 +107,9 @@ class PickSingleYCBEnv(BaseEnv):
     def _default_human_render_camera_configs(self):
         pose = sapien_utils.look_at([0.6, 0.7, 0.6], [0.0, 0.0, 0.35])
         return CameraConfig("render_camera", pose, 512, 512, 1, 0.01, 100)
+
+    def _load_agent(self, options: dict):
+        super()._load_agent(options, sapien.Pose(p=[-0.615, 0, 0]))
 
     def _load_scene(self, options: dict):
         global WARNED_ONCE
@@ -79,11 +120,7 @@ class PickSingleYCBEnv(BaseEnv):
 
         # randomize the list of all possible models in the YCB dataset
         # then sub-scene i will load model model_ids[i % number_of_ycb_objects]
-        rand_idx = torch.randperm(len(self.all_model_ids))
-        model_ids = self.all_model_ids[rand_idx]
-        model_ids = np.concatenate(
-            [model_ids] * np.ceil(self.num_envs / len(self.all_model_ids)).astype(int)
-        )[: self.num_envs]
+        model_ids = self._batched_episode_rng.choice(self.all_model_ids, replace=True)
         if (
             self.num_envs > 1
             and self.num_envs < len(self.all_model_ids)
@@ -94,7 +131,7 @@ class PickSingleYCBEnv(BaseEnv):
             print(
                 """There are less parallel environments than total available models to sample.
                 Not all models will be used during interaction even after resets unless you call env.reset(options=dict(reconfigure=True))
-                or set reconfiguration_freq to be > 1."""
+                or set reconfiguration_freq to be >= 1."""
             )
 
         self._objs: List[Actor] = []
@@ -105,9 +142,12 @@ class PickSingleYCBEnv(BaseEnv):
                 self.scene,
                 id=f"ycb:{model_id}",
             )
+            builder.initial_pose = sapien.Pose(p=[0, 0, 0])
             builder.set_scene_idxs([i])
             self._objs.append(builder.build(name=f"{model_id}-{i}"))
+            self.remove_from_state_dict_registry(self._objs[-1])
         self.obj = Actor.merge(self._objs, name="ycb_object")
+        self.add_to_state_dict_registry(self.obj)
 
         self.goal_site = actors.build_sphere(
             self.scene,
@@ -116,6 +156,7 @@ class PickSingleYCBEnv(BaseEnv):
             name="goal_site",
             body_type="kinematic",
             add_collision=False,
+            initial_pose=sapien.Pose(),
         )
         self._hidden_objects.append(self.goal_site)
 
@@ -125,7 +166,7 @@ class PickSingleYCBEnv(BaseEnv):
             collision_mesh = obj.get_first_collision_mesh()
             # this value is used to set object pose so the bottom is at z=0
             self.object_zs.append(-collision_mesh.bounding_box.bounds[0, 2])
-        self.object_zs = common.to_tensor(self.object_zs)
+        self.object_zs = common.to_tensor(self.object_zs, device=self.device)
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         with torch.device(self.device):
@@ -134,7 +175,6 @@ class PickSingleYCBEnv(BaseEnv):
             xyz = torch.zeros((b, 3))
             xyz[:, :2] = torch.rand((b, 2)) * 0.2 - 0.1
             xyz[:, 2] = self.object_zs[env_idx]
-
             qs = random_quaternions(b, lock_x=True, lock_y=True)
             self.obj.set_pose(Pose.create_from_pq(p=xyz, q=qs))
 
@@ -155,13 +195,6 @@ class PickSingleYCBEnv(BaseEnv):
                 )
                 self.agent.reset(qpos)
                 self.agent.robot.set_root_pose(sapien.Pose([-0.615, 0, 0]))
-            elif self.robot_uids == "xmate3_robotiq":
-                qpos = np.array([0, 0.6, 0, 1.3, 0, 1.3, -1.57, 0, 0])
-                qpos[:-2] += self._episode_rng.normal(
-                    0, self.robot_init_qpos_noise, len(qpos) - 2
-                )
-                self.agent.reset(qpos)
-                self.agent.robot.set_root_pose(sapien.Pose([-0.562, 0, 0]))
             else:
                 raise NotImplementedError(self.robot_uids)
 

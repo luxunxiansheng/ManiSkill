@@ -12,7 +12,11 @@ import torch
 import trimesh
 
 from mani_skill.utils import common, sapien_utils
-from mani_skill.utils.geometry.trimesh_utils import get_component_meshes, merge_meshes
+from mani_skill.utils.geometry.trimesh_utils import (
+    get_component_meshes,
+    get_render_shape_meshes,
+    merge_meshes,
+)
 from mani_skill.utils.structs import ArticulationJoint, BaseStruct, Link, Pose
 from mani_skill.utils.structs.types import Array
 
@@ -57,7 +61,7 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
     """
 
     _cached_joint_target_indices: Dict[int, torch.Tensor] = field(default_factory=dict)
-    """Map from a set of joints of this articulation and the indexing torch tensor to use for setting drive targets"""
+    """Map from a set of joints of this articulation and the indexing torch tensor to use for setting drive targets in GPU sims."""
 
     _net_contact_force_queries: Dict[
         Tuple, physx.PhysxGpuContactBodyImpulseQuery
@@ -80,6 +84,7 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
         scene: ManiSkillScene,
         scene_idxs: torch.Tensor,
         _merged: bool = False,
+        _process_links: bool = True,
     ) -> Articulation:
         """
         Create a managed articulation object given a list of physx articulations. Note that this function requires all given articulations
@@ -116,7 +121,7 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
 
         links_map: Dict[str, Link] = dict()
         for articulation in physx_articulations:
-            if not _merged:
+            if _process_links:
                 assert num_links == len(articulation.links) and num_joints == len(
                     articulation.joints
                 ), "Gave different physx articulations. Articulation object created via create_from_physx_articulations can only \
@@ -139,14 +144,13 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
             assert wrapped_link.is_root.any() == wrapped_link.is_root.all()
             if wrapped_link.is_root.any():
                 root = wrapped_link
-                if _merged:
+                if not _process_links:
+                    # if not processing links we break early so that we only processed the root link which is always shared between articulations
                     break
         assert root is not None, "root link was not found"
         self.root = root
 
-        # we can only really have links and links maps when this is not a merged articulation.
-        # For merged articulations only the root link can make sense (it holds the root pose)
-        if not _merged:
+        if _process_links:
             self.links = wrapped_links
             self.links_map = links_map
 
@@ -177,12 +181,12 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
                         len(joints), dtype=torch.int32, device=self.device
                     )
                     + joint_index,
-                    active_joint_index=torch.zeros(
-                        len(joints), dtype=torch.int32, device=self.device
-                    )
-                    + active_joint_index
-                    if active_joint_index is not None
-                    else None,
+                    active_joint_index=(
+                        torch.zeros(len(joints), dtype=torch.int32, device=self.device)
+                        + active_joint_index
+                        if active_joint_index is not None
+                        else None
+                    ),
                 )
                 wrapped_joint.name = "_".join(
                     joints[0].name.replace(self.name, "", 1).split("_")[1:]
@@ -217,7 +221,21 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
         return self
 
     @classmethod
-    def merge(cls, articulations: List["Articulation"], name: str = None):
+    def merge(
+        cls,
+        articulations: List["Articulation"],
+        name: str = None,
+        merge_links: bool = False,
+    ):
+        """
+        Merge a list of articulations into a single articulation for easy access of data across multiple possibly different articulations.
+
+        Args:
+            articulations: A list of articulations objects to merge.
+            name: The name of the merged articulation.
+            merge_links: Whether to merge the links of the articulations. This is by default False as often times you merge articulations
+                that have different number of links. Set this true if you want to try and merge articulations that have the same number of links.
+        """
         objs = []
         scene = articulations[0].scene
         merged_scene_idxs = []
@@ -230,7 +248,7 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
             ), "Each given articulation must have the same number of managed objects"
         merged_scene_idxs = torch.concat(merged_scene_idxs)
         merged_articulation = Articulation.create_from_physx_articulations(
-            objs, scene, merged_scene_idxs, _merged=True
+            objs, scene, merged_scene_idxs, _merged=True, _process_links=merge_links
         )
         merged_articulation.name = name
         scene.articulation_views[merged_articulation.name] = merged_articulation
@@ -248,6 +266,14 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
             dtype=torch.int32,
         )
 
+    @cached_property
+    def fixed_root_link(self):
+        return torch.tensor(
+            [x.links[0].entity.components[0].joint.type == "fixed" for x in self._objs],
+            device=self.device,
+            dtype=torch.bool,
+        )
+
     def get_state(self):
         pose = self.root.pose
         vel = self.root.get_linear_velocity()  # [N, 3]
@@ -257,19 +283,18 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
         return torch.hstack([pose.p, pose.q, vel, ang_vel, qpos, qvel])
 
     def set_state(self, state: Array, env_idx: torch.Tensor = None):
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             if env_idx is not None:
                 prev_reset_mask = self.scene._reset_mask.clone()
                 # safe guard against setting the wrong states
                 self.scene._reset_mask[:] = False
                 self.scene._reset_mask[env_idx] = True
-            state = common.to_tensor(state)
+            state = common.to_tensor(state, device=self.device)
             self.set_root_pose(Pose.create(state[:, :7]))
             self.set_root_linear_velocity(state[:, 7:10])
             self.set_root_angular_velocity(state[:, 10:13])
-            # TODO (stao): Handle get/set state for envs with different DOFs. Perhaps need to let user set a padding ahead of time to ensure state is the same?
             self.set_qpos(state[:, 13 : 13 + self.max_dof])
-            self.set_qvel(state[:, 13 + self.max_dof :])
+            self.set_qvel(state[:, 13 + self.max_dof : 13 + self.max_dof * 2])
             if env_idx is not None:
                 self.scene._reset_mask = prev_reset_mask
         else:
@@ -277,7 +302,7 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
             self.set_root_pose(sapien.Pose(state[0:3], state[3:7]))
             self.set_root_linear_velocity(state[7:10])
             self.set_root_angular_velocity(state[10:13])
-            qpos, qvel = np.split(state[13:], 2)
+            qpos, qvel = np.split(state[13 : 13 + self.max_dof * 2], 2)
             self.set_qpos(qpos)
             self.set_qvel(qvel)
 
@@ -320,7 +345,7 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
         assert (
             not self.merged
         ), "Currently you cannot fetch collision meshes of merged articulations as merged articulations only share a root link"
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             assert (
                 self.scene._gpu_sim_initialized
             ), "During GPU simulation link pose data is not accessible until after \
@@ -343,14 +368,57 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
             meshes.append(mesh)
             if first_only:
                 break
-        if to_world_frame:
-            mat = self.pose
-            for i, mesh in enumerate(meshes):
-                if mat is not None:
-                    if len(mat) > 1:
-                        mesh.apply_transform(mat[i].sp.to_transformation_matrix())
-                    else:
-                        mesh.apply_transform(mat.sp.to_transformation_matrix())
+        if first_only:
+            return meshes[0]
+        return meshes
+
+    def get_first_visual_mesh(self, to_world_frame: bool = True) -> trimesh.Trimesh:
+        """
+        Returns the visual mesh of the first managed articulation object. Note results of this are not cached or optimized at the moment
+        so this function can be slow if called too often
+        """
+        return self.get_visual_meshes(to_world_frame=to_world_frame, first_only=True)
+
+    def get_visual_meshes(
+        self, to_world_frame: bool = True, first_only: bool = False
+    ) -> List[trimesh.Trimesh]:
+        """
+        Returns the visual mesh of each managed articulation object. Note results of this are not cached or optimized at the moment
+        so this function can be slow if called too often
+        """
+        assert (
+            not self.merged
+        ), "Currently you cannot fetch visual meshes of merged articulations as merged articulations only share a root link"
+        if self.scene.gpu_sim_enabled:
+            assert (
+                self.scene._gpu_sim_initialized
+            ), "During GPU simulation link pose data is not accessible until after \
+                initialization, and link poses are needed to get the correct visual mesh of an entire articulation"
+        else:
+            self._objs[0].pose = self._objs[0].pose
+        meshes: List[trimesh.Trimesh] = []
+        for i, art in enumerate(self._objs):
+            art_meshes = []
+            for link in art.links:
+                render_shapes = []
+                rb_comp = link.entity.find_component_by_type(
+                    sapien.render.RenderBodyComponent
+                )
+                if rb_comp is not None:
+                    for render_shape in rb_comp.render_shapes:
+                        render_shapes += get_render_shape_meshes(render_shape)
+                    link_mesh = merge_meshes(render_shapes)
+                    if link_mesh is not None:
+                        if to_world_frame:
+                            pose = self.links[link.index].pose[i]
+                            link_mesh.apply_transform(
+                                pose.sp.to_transformation_matrix()
+                            )
+                        art_meshes.append(link_mesh)
+            mesh = merge_meshes(art_meshes)
+            meshes.append(mesh)
+            if first_only:
+                break
         if first_only:
             return meshes[0]
         return meshes
@@ -361,7 +429,7 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
 
         Returns impulse vector of shape (N, len(link_names), 3) where N is the number of environments
         """
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             if tuple(link_names) not in self._net_contact_force_queries:
                 bodies = []
                 for k in link_names:
@@ -413,13 +481,54 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
         """
         return self.get_net_contact_impulses(link_names) / self.scene.timestep
 
+    def get_joint_target_indices(self, joint_indices):
+        if joint_indices not in self._cached_joint_target_indices:
+            self._cached_joint_target_indices[joint_indices] = torch.meshgrid(
+                self._data_index, joint_indices, indexing="ij"
+            )
+        return self._cached_joint_target_indices[joint_indices]
+
+    def get_drive_targets(self):
+        return self.drive_targets
+
+    def get_drive_velocities(self):
+        return self.drive_velocities
+
+    @property
+    def drive_targets(self):
+        """
+        The current drive targets of the active joints. Also known as the target joint positions. Returns a tensor
+        of shape (N, M) where N is the number of environments and M is the number of active joints.
+        """
+        if self.scene.gpu_sim_enabled:
+            return self.px.cuda_articulation_target_qpos[
+                self.get_joint_target_indices(self.active_joints)
+            ]
+        else:
+            return torch.cat([x.drive_target for x in self.active_joints], dim=-1)
+
+    @property
+    def drive_velocities(self):
+        """
+        The current drive velocity targets of the active joints. Also known as the target joint velocities. Returns a tensor
+        of shape (N, M) where N is the number of environments and M is the number of active joints.
+        """
+        if self.scene.gpu_sim_enabled:
+            return self.px.cuda_articulation_target_qvel[
+                self.get_joint_target_indices(self.active_joints)
+            ]
+        else:
+            return torch.cat(
+                [x.drive_velocity_target for x in self.active_joints], dim=-1
+            )
+
     # -------------------------------------------------------------------------- #
     # Functions from physx.PhysxArticulation
     # -------------------------------------------------------------------------- #
     def compute_passive_force(self, *args, **kwargs):
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             raise NotImplementedError(
-                "Passive force computation is currently not supported in PhysX"
+                "Passive force computation is currently not supported in GPU PhysX"
             )
         else:
             return self._objs[0].compute_passive_force(*args, **kwargs)
@@ -553,7 +662,7 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
 
     @property
     def qacc(self):
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             return self.px.cuda_articulation_qacc.torch()[
                 self._data_index, : self.max_dof
             ]
@@ -565,7 +674,7 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
     #     pass
     @property
     def qf(self):
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             return self.px.cuda_articulation_qf.torch()[
                 self._data_index, : self.max_dof
             ]
@@ -574,8 +683,8 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
 
     @qf.setter
     def qf(self, arg1: torch.Tensor):
-        if physx.is_gpu_enabled():
-            arg1 = common.to_tensor(arg1)
+        if self.scene.gpu_sim_enabled:
+            arg1 = common.to_tensor(arg1, device=self.device)
             self.px.cuda_articulation_qf.torch()[
                 self._data_index[self.scene._reset_mask[self._scene_idxs]],
                 : self.max_dof,
@@ -599,7 +708,7 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
 
     @property
     def qpos(self):
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             # NOTE (stao): cuda_articulation_qpos is of shape (M, N) where M is the total number of articulations in the physx scene,
             # N is the max dof of all those articulations.
             return self.px.cuda_articulation_qpos.torch()[
@@ -610,8 +719,8 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
 
     @qpos.setter
     def qpos(self, arg1: torch.Tensor):
-        if physx.is_gpu_enabled():
-            arg1 = common.to_tensor(arg1)
+        if self.scene.gpu_sim_enabled:
+            arg1 = common.to_tensor(arg1, device=self.device)
             self.px.cuda_articulation_qpos.torch()[
                 self._data_index[self.scene._reset_mask[self._scene_idxs]],
                 : self.max_dof,
@@ -624,7 +733,7 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
 
     @property
     def qvel(self):
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             return self.px.cuda_articulation_qvel.torch()[
                 self._data_index, : self.max_dof
             ]
@@ -633,8 +742,8 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
 
     @qvel.setter
     def qvel(self, arg1: torch.Tensor):
-        if physx.is_gpu_enabled():
-            arg1 = common.to_tensor(arg1)
+        if self.scene.gpu_sim_enabled:
+            arg1 = common.to_tensor(arg1, device=self.device)
             self.px.cuda_articulation_qvel.torch()[
                 self._data_index[self.scene._reset_mask[self._scene_idxs]],
                 : self.max_dof,
@@ -651,11 +760,11 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
 
     @root_angular_velocity.setter
     def root_angular_velocity(self, arg1: Array) -> None:
-        if physx.is_gpu_enabled():
-            arg1 = common.to_tensor(arg1)
+        if self.scene.gpu_sim_enabled:
+            arg1 = common.to_tensor(arg1, device=self.device)
             self.px.cuda_rigid_body_data.torch()[
                 self.root._body_data_index[self.scene._reset_mask[self._scene_idxs]],
-                10:13,
+                7:10,
             ] = arg1
         else:
             arg1 = common.to_numpy(arg1)
@@ -669,11 +778,11 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
 
     @root_linear_velocity.setter
     def root_linear_velocity(self, arg1: Array) -> None:
-        if physx.is_gpu_enabled():
-            arg1 = common.to_tensor(arg1)
+        if self.scene.gpu_sim_enabled:
+            arg1 = common.to_tensor(arg1, device=self.device)
             self.px.cuda_rigid_body_data.torch()[
                 self.root._body_data_index[self.scene._reset_mask[self._scene_idxs]],
-                7:10,
+                10:13,
             ] = arg1
         else:
             arg1 = common.to_numpy(arg1)
@@ -694,15 +803,12 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
     # -------------------------------------------------------------------------- #
     def create_pinocchio_model(self):
         # NOTE (stao): This is available but not typed in SAPIEN
-        if physx.is_gpu_enabled():
+        if self.scene.gpu_sim_enabled:
             raise NotImplementedError(
-                "Cannot create a pinocchio model when GPU is enabled. If you wish to do inverse kinematics you must use fast_kinematics"
+                "Cannot create a pinocchio model when GPU is enabled."
             )
         else:
             return self._objs[0].create_pinocchio_model()
-
-    # def _get_joint_indices(self, joints: List[Joint]):
-    #     if
 
     def set_joint_drive_targets(
         self,
@@ -712,16 +818,10 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
     ):
         """
         Set drive targets on active joints. Joint indices are required to be given for GPU sim, and joint objects are required for the CPU sim
-
-        TODO (stao): can we use joint indices for the CPU sim as well? Some global joint indices?
         """
-        if physx.is_gpu_enabled():
-            targets = common.to_tensor(targets)
-            if joint_indices not in self._cached_joint_target_indices:
-                self._cached_joint_target_indices[joint_indices] = torch.meshgrid(
-                    self._data_index, joint_indices, indexing="ij"
-                )
-            gx, gy = self._cached_joint_target_indices[joint_indices]
+        if self.scene.gpu_sim_enabled:
+            targets = common.to_tensor(targets, device=self.device)
+            gx, gy = self.get_joint_target_indices(joint_indices)
             self.px.cuda_articulation_target_qpos.torch()[gx, gy] = targets
         else:
             for i, joint in enumerate(joints):
@@ -735,16 +835,10 @@ class Articulation(BaseStruct[physx.PhysxArticulation]):
     ):
         """
         Set drive velocity targets on active joints. Joint indices are required to be given for GPU sim, and joint objects are required for the CPU sim
-
-        TODO (stao): can we use joint indices for the CPU sim as well? Some global joint indices?
         """
-        if physx.is_gpu_enabled():
-            targets = common.to_tensor(targets)
-            if joint_indices not in self._cached_joint_target_indices:
-                self._cached_joint_target_indices[joint_indices] = torch.meshgrid(
-                    self._data_index, joint_indices, indexing="ij"
-                )
-            gx, gy = self._cached_joint_target_indices[joint_indices]
+        if self.scene.gpu_sim_enabled:
+            targets = common.to_tensor(targets, device=self.device)
+            gx, gy = self.get_joint_target_indices(joint_indices)
             self.px.cuda_articulation_target_qvel.torch()[gx, gy] = targets
         else:
             for i, joint in enumerate(joints):

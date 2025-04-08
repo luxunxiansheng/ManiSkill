@@ -158,7 +158,8 @@ class BaseBridgeEnv(BaseDigitalTwinEnv):
     SUPPORTED_OBS_MODES = ["rgb+segmentation"]
     SUPPORTED_REWARD_MODES = ["none"]
     scene_setting: Literal["flat_table", "sink"] = "flat_table"
-    objs: Dict[str, Actor] = dict()
+    objects_excluded_from_greenscreening: List[str] = []
+    """object ids that should not be greenscreened"""
 
     obj_static_friction = 0.5
     obj_dynamic_friction = 0.5
@@ -170,6 +171,7 @@ class BaseBridgeEnv(BaseDigitalTwinEnv):
         quat_configs: torch.Tensor,
         **kwargs,
     ):
+        self.objs: Dict[str, Actor] = dict()
         self.obj_names = obj_names
         self.source_obj_name = obj_names[0]
         self.target_obj_name = obj_names[1]
@@ -271,6 +273,11 @@ class BaseBridgeEnv(BaseDigitalTwinEnv):
         self.scene.add_directional_light([-1, -0.5, -1], [0.7, 0.7, 0.7])
         self.scene.add_directional_light([1, 1, -1], [0.7, 0.7, 0.7])
 
+    def _load_agent(self, options: dict):
+        super()._load_agent(
+            options, sapien.Pose(p=[0.127, 0.060, 0.85], q=[0, 0, 0, 1])
+        )
+
     def _load_scene(self, options: dict):
         # original SIMPLER envs always do this? except for open drawer task
         for i in range(self.num_envs):
@@ -296,8 +303,12 @@ class BaseBridgeEnv(BaseDigitalTwinEnv):
         for name in self.obj_names:
             self.objs[name] = self._build_actor_helper(name)
 
-        self.xyz_configs = common.to_tensor(self.xyz_configs).to(torch.float32)
-        self.quat_configs = common.to_tensor(self.quat_configs).to(torch.float32)
+        self.xyz_configs = common.to_tensor(self.xyz_configs, device=self.device).to(
+            torch.float32
+        )
+        self.quat_configs = common.to_tensor(self.quat_configs, device=self.device).to(
+            torch.float32
+        )
 
         if self.scene_setting == "sink":
             self.sink = self._build_actor_helper(
@@ -316,6 +327,7 @@ class BaseBridgeEnv(BaseDigitalTwinEnv):
                 if this_available_model_scales is None:
                     model_scales.append(1.0)
                 else:
+                    # TODO (stao): use the batched RNG
                     model_scales[model_id] = self.np_random.choice(
                         this_available_model_scales
                     )
@@ -327,10 +339,16 @@ class BaseBridgeEnv(BaseDigitalTwinEnv):
             if "bbox" in model_info:
                 bbox = model_info["bbox"]
                 bbox_size = np.array(bbox["max"]) - np.array(bbox["min"])
-                model_bbox_sizes[model_id] = common.to_tensor(bbox_size * model_scale)
+                model_bbox_sizes[model_id] = common.to_tensor(
+                    bbox_size * model_scale, device=self.device
+                )
             else:
                 raise ValueError(f"Model {model_id} does not have bbox info.")
         self.episode_model_bbox_sizes = model_bbox_sizes
+
+        for obj_name in self.objects_excluded_from_greenscreening:
+            self.remove_object_from_greenscreen(self.objs[obj_name])
+        self.remove_object_from_greenscreen(self.agent.robot)
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         # NOTE: this part of code is not GPU parallelized

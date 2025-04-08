@@ -44,25 +44,7 @@ class Fetch(BaseAgent):
     keyframes = dict(
         rest=Keyframe(
             pose=sapien.Pose(),
-            qpos=np.array(
-                [
-                    0,
-                    0,
-                    0,
-                    0.386,
-                    0,
-                    -0.370,
-                    0.562,
-                    -1.032,
-                    0.695,
-                    0.955,
-                    -0.1,
-                    2.077,
-                    0,
-                    0.015,
-                    0.015,
-                ]
-            ),
+            qpos=np.array([0, 0, 0, 0.386, 0, -0.370, 0.562, -1.032, 0.695, 0.955, -0.1, 2.077, 0, 0.015, 0.015]),  # fmt: skip
         )
     )
 
@@ -247,13 +229,24 @@ class Fetch(BaseAgent):
             use_delta=True,
         )
 
+        # useful to keep body unmoving from passed position
+        stiff_body_pd_joint_pos = PDJointPosControllerConfig(
+            self.body_joint_names,
+            None,
+            None,
+            1e5,
+            1e5,
+            1e5,
+            normalize_action=False,
+        )
+
         # -------------------------------------------------------------------------- #
         # Base
         # -------------------------------------------------------------------------- #
         base_pd_joint_vel = PDBaseForwardVelControllerConfig(
             self.base_joint_names,
-            lower=[-0.5, -3.14],
-            upper=[0.5, 3.14],
+            lower=[-1, -3.14],
+            upper=[1, 3.14],
             damping=1000,
             force_limit=500,
         )
@@ -327,6 +320,12 @@ class Fetch(BaseAgent):
                 body=body_pd_joint_delta_pos,
                 base=base_pd_joint_vel,
             ),
+            pd_joint_delta_pos_stiff_body=dict(
+                arm=arm_pd_joint_delta_pos,
+                gripper=gripper_pd_joint_pos,
+                body=stiff_body_pd_joint_pos,
+                base=base_pd_joint_vel,
+            ),
         )
 
         # Make a deepcopy in case users modify any config
@@ -398,9 +397,12 @@ class Fetch(BaseAgent):
         )
         return torch.logical_and(lflag, rflag)
 
-    def is_static(self, threshold: float = 0.2):
-        qvel = self.robot.get_qvel()[..., :-2]
-        return torch.max(torch.abs(qvel), 1)[0] <= threshold
+    def is_static(self, threshold: float = 0.2, base_threshold: float = 0.05):
+        body_qvel = self.robot.get_qvel()[..., 3:-2]
+        base_qvel = self.robot.get_qvel()[..., :3]
+        return torch.all(body_qvel <= threshold, dim=1) & torch.all(
+            base_qvel <= base_threshold, dim=1
+        )
 
     @staticmethod
     def build_grasp_pose(approaching, closing, center):
