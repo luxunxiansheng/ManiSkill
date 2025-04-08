@@ -36,6 +36,9 @@ imgui.ini
 /demos
 /videos
 /examples/benchmarking/videos
+/examples/tutorials/demos
+/examples/tutorials/runs
+/examples/tutorials/videos
 
 # benchmarking
 /benchmark_results
