@@ -2,6 +2,7 @@ FROM nvidia/cudagl:11.3.1-devel-ubuntu20.04
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 ARG PYTHON_VERSION=3.9
 
+
 # Install os-level packages
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     bash-completion \
@@ -42,8 +43,10 @@ COPY nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.json
 COPY nvidia_layers.json /etc/vulkan/implicit_layer.d/nvidia_layers.json
 
 # install dependencies
-RUN pip install --upgrade mani-skill==3.0.0b20 && pip cache purge
-RUN pip install torch 
+
+
+# RUN pip install --upgrade mani-skill-nightly && pip cache purge
+# RUN pip install torch
 
 # download physx GPU binary via sapien
-RUN python -c "exec('import sapien.physx as physx;\ntry:\n  physx.enable_gpu()\nexcept:\n  pass;')"
+# RUN python -c "exec('import sapien.physx as physx;\ntry:\n  physx.enable_gpu()\nexcept:\n  pass;')"

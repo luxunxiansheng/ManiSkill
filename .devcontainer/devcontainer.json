@@ -2,7 +2,7 @@
   "name": "ManiSkill Dev Container",
   "build": {
     "dockerfile": "../docker/Dockerfile",
-    "context": "../docker"
+    "context": "../docker", 
   },
   "containerEnv": {
     "http_proxy": "${localEnv:http_proxy}",
@@ -65,6 +65,8 @@
       ]
     }
   },
+
+  "postCreateCommand": "pip install --upgrade mani-skill-nightly && pip cache purge && pip install torch && python -c \"exec('import sapien.physx as physx;\\ntry:\\n  physx.enable_gpu()\\nexcept:\\n  pass;')\""
 
 
 }
