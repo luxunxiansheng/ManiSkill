@@ -1,0 +1,24 @@
+{
+  "env_info": {
+    "env_id": "PickCubeSO100-v1",
+    "env_kwargs": {
+      "num_envs": 1,
+      "render_mode": "rgb_array",
+      "enable_shadow": true
+    },
+    "max_episode_steps": 50
+  },
+  "commit_info": null,
+  "episodes": [
+    {
+      "episode_id": 0,
+      "episode_seed": 2022,
+      "control_mode": "pd_joint_delta_pos",
+      "elapsed_steps": 1000,
+      "reset_kwargs": {
+        "options": {}
+      },
+      "success": false
+    }
+  ]
+}
