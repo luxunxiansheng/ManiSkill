@@ -1,0 +1,41 @@
+{
+  "env_info": {
+    "env_id": "PushCube-v1",
+    "env_kwargs": {
+      "num_envs": 1,
+      "reconfiguration_freq": 1,
+      "obs_mode": "rgb",
+      "render_mode": "all",
+      "sim_backend": "physx_cuda",
+      "control_mode": "pd_joint_delta_pos"
+    },
+    "max_episode_steps": 50
+  },
+  "commit_info": null,
+  "episodes": [
+    {
+      "episode_id": 0,
+      "episode_seed": 1791095845,
+      "control_mode": "pd_joint_delta_pos",
+      "elapsed_steps": 50,
+      "reset_kwargs": {
+        "options": {}
+      },
+      "success": false
+    },
+    {
+      "episode_id": 1,
+      "episode_seed": 2135392491,
+      "control_mode": "pd_joint_delta_pos",
+      "elapsed_steps": 50,
+      "reset_kwargs": {
+        "options": {
+          "env_idx": [
+            0
+          ]
+        }
+      },
+      "success": false
+    }
+  ]
+}
