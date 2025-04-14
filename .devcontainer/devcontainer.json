@@ -66,7 +66,7 @@
     }
   },
 
-  "postCreateCommand": "pip install ipykernel && pip install --upgrade mani-skill && pip cache purge && pip install torch && python -c \"exec('import sapien.physx as physx;\\ntry:\\n  physx.enable_gpu()\\nexcept:\\n  pass;')\""
+  "postCreateCommand": "pip install ipykernel && pip install --upgrade mani-skill-nightly && pip cache purge && pip install torch && python -c \"exec('import sapien.physx as physx;\\ntry:\\n  physx.enable_gpu()\\nexcept:\\n  pass;')\""
 
 
 }
